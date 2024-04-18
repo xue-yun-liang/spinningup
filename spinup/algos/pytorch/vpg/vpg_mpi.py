@@ -5,6 +5,8 @@ import gym
 import time
 import spinup.algos.pytorch.vpg.core as core
 from spinup.utils.logx import EpochLogger
+from spinup.utils.mpi_pytorch import setup_pytorch_for_mpi, sync_params, mpi_avg_grads
+from spinup.utils.mpi_tools import mpi_fork, mpi_avg, proc_id, mpi_statistics_scalar, num_procs
 
 
 class VPGBuffer:
@@ -74,11 +76,9 @@ class VPGBuffer:
         """
         assert self.ptr == self.max_size    # buffer has to be full before you can get
         self.ptr, self.path_start_idx = 0, 0
-        # the next four lines implement the advantage normalization trick
-        adv_torch = torch.as_tensor(self.adv_buf, dtype=torch.float32)
-        adv_mean, adv_std = torch.mean(adv_torch), torch.std(adv_torch)
-        adv_troch_norm = (adv_torch - adv_mean) / adv_std
-        self.adv_buf = adv_troch_norm.numpy()
+        # the next two lines implement the advantage normalization trick
+        adv_mean, adv_std = mpi_statistics_scalar(self.adv_buf)
+        self.adv_buf = (self.adv_buf - adv_mean) / adv_std
         data = dict(obs=self.obs_buf, act=self.act_buf, ret=self.ret_buf,
                     adv=self.adv_buf, logp=self.logp_buf)
         return {k: torch.as_tensor(v, dtype=torch.float32) for k,v in data.items()}
@@ -177,37 +177,37 @@ def vpg(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(),  seed=0,
     """
 
     # Special function to avoid certain slowdowns from PyTorch + MPI combo.
-    # setup_pytorch_for_mpi()
+    setup_pytorch_for_mpi()
 
-    # 1. Set up logger and save configuration
+    # Set up logger and save configuration
     logger = EpochLogger(**logger_kwargs)
     logger.save_config(locals())
 
-    # 2. Random seed
-    # seed += 10000 * proc_id()
-    seed = 123456
+    # Random seed
+    seed += 10000 * proc_id()
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    # 3. Instantiate environment
+    # Instantiate environment
     env = env_fn()
     obs_dim = env.observation_space.shape
     act_dim = env.action_space.shape
 
-    # 4. Create actor-critic module
+    # Create actor-critic module
     ac = actor_critic(env.observation_space, env.action_space, **ac_kwargs)
 
     # Sync params across processes
-    # sync_params(ac)
+    sync_params(ac)
 
-    # Count the number of variables of policy net and value net
+    # Count variables
     var_counts = tuple(core.count_vars(module) for module in [ac.pi, ac.v])
     logger.log('\nNumber of parameters: \t pi: %d, \t v: %d\n'%var_counts)
 
-    # 5. Set up experience buffer
-    buf = VPGBuffer(obs_dim, act_dim, steps_per_epoch, gamma, lam)
+    # Set up experience buffer
+    local_steps_per_epoch = int(steps_per_epoch / num_procs())
+    buf = VPGBuffer(obs_dim, act_dim, local_steps_per_epoch, gamma, lam)
 
-    # 6. Set up function for computing VPG policy loss
+    # Set up function for computing VPG policy loss
     def compute_loss_pi(data):
         obs, act, adv, logp_old = data['obs'], data['act'], data['adv'], data['logp']
 
@@ -227,14 +227,13 @@ def vpg(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(),  seed=0,
         obs, ret = data['obs'], data['ret']
         return ((ac.v(obs) - ret)**2).mean()
 
-    # 7. Set up optimizers for policy and value function
+    # Set up optimizers for policy and value function
     pi_optimizer = Adam(ac.pi.parameters(), lr=pi_lr)
     vf_optimizer = Adam(ac.v.parameters(), lr=vf_lr)
 
-    # 8. Set up model saving
+    # Set up model saving
     logger.setup_pytorch_saver(ac)
 
-    # 9. Setup a update function: runs one epoch of optimization
     def update():
         data = buf.get()
 
@@ -247,7 +246,7 @@ def vpg(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(),  seed=0,
         pi_optimizer.zero_grad()
         loss_pi, pi_info = compute_loss_pi(data)
         loss_pi.backward()
-        # mpi_avg_grads(ac.pi)    # average grads across MPI processes
+        mpi_avg_grads(ac.pi)    # average grads across MPI processes
         pi_optimizer.step()
 
         # Value function learning
@@ -255,7 +254,7 @@ def vpg(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(),  seed=0,
             vf_optimizer.zero_grad()
             loss_v = compute_loss_v(data)
             loss_v.backward()
-            # mpi_avg_grads(ac.v)    # average grads across MPI processes
+            mpi_avg_grads(ac.v)    # average grads across MPI processes
             vf_optimizer.step()
 
         # Log changes from update
@@ -269,9 +268,9 @@ def vpg(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(),  seed=0,
     start_time = time.time()
     o, ep_ret, ep_len = env.reset(), 0, 0
 
-    # 10. Main loop: collect experience in env and update/log each epoch
+    # Main loop: collect experience in env and update/log each epoch
     for epoch in range(epochs):
-        for t in range(steps_per_epoch):
+        for t in range(local_steps_per_epoch):
             a, v, logp = ac.step(torch.as_tensor(o, dtype=torch.float32))
 
             next_o, r, d, _ = env.step(a)
@@ -287,7 +286,7 @@ def vpg(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(),  seed=0,
 
             timeout = ep_len == max_ep_len
             terminal = d or timeout
-            epoch_ended = t==steps_per_epoch-1
+            epoch_ended = t==local_steps_per_epoch-1
 
             if terminal or epoch_ended:
                 if epoch_ended and not(terminal):
@@ -340,12 +339,11 @@ if __name__ == '__main__':
     parser.add_argument('--exp_name', type=str, default='vpg')
     args = parser.parse_args()
 
-    # mpi_fork(args.cpu)  # run parallel code with mpi
+    mpi_fork(args.cpu)  # run parallel code with mpi
 
     from spinup.utils.run_utils import setup_logger_kwargs
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed)
 
-    # why the batch size is losed ?
     vpg(lambda : gym.make(args.env), actor_critic=core.MLPActorCritic,
         ac_kwargs=dict(hidden_sizes=[args.hid]*args.l), gamma=args.gamma, 
         seed=args.seed, steps_per_epoch=args.steps, epochs=args.epochs,

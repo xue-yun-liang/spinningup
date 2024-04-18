@@ -22,7 +22,7 @@ def reward_to_go(rews):
     return rtgs
 
 def train(env_name='CartPole-v0', hidden_sizes=[32], lr=1e-2, 
-          epochs=50, batch_size=5000, render=False):
+          epochs=100, batch_size=5000):
 
     # make environment, check spaces, get obs / act dims
     env = gym.make(env_name)
@@ -68,15 +68,8 @@ def train(env_name='CartPole-v0', hidden_sizes=[32], lr=1e-2,
         done = False            # signal from environment that episode is over
         ep_rews = []            # list for rewards accrued throughout ep
 
-        # render first episode of each epoch
-        finished_rendering_this_epoch = False
-
         # collect experience by acting in the environment with current policy
         while True:
-
-            # rendering
-            if (not finished_rendering_this_epoch) and render:
-                env.render()
 
             # save obs
             batch_obs.append(obs.copy())
@@ -100,9 +93,6 @@ def train(env_name='CartPole-v0', hidden_sizes=[32], lr=1e-2,
 
                 # reset episode-specific variables
                 obs, done, ep_rews = env.reset(), False, []
-
-                # won't render again this epoch
-                finished_rendering_this_epoch = True
 
                 # end experience loop if we have enough of it
                 if len(batch_obs) > batch_size:
@@ -128,8 +118,8 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--env_name', '--env', type=str, default='CartPole-v0')
-    parser.add_argument('--render', action='store_true')
+    parser.add_argument('--epochs', '-ep', type=int, default=50)
     parser.add_argument('--lr', type=float, default=1e-2)
     args = parser.parse_args()
     print('\nUsing reward-to-go formulation of policy gradient.\n')
-    train(env_name=args.env_name, render=args.render, lr=args.lr)
+    train(env_name=args.env_name, lr=args.lr, epochs=args.epochs)
