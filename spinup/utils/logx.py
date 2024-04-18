@@ -55,17 +55,7 @@ def restore_tf_graph(sess, fpath):
         A dictionary mapping from keys to tensors in the computation graph
         loaded from ``fpath``. 
     """
-    tf.saved_model.loader.load(
-                sess,
-                [tf.saved_model.tag_constants.SERVING],
-                fpath
-            )
-    model_info = joblib.load(osp.join(fpath, 'model_info.pkl'))
-    graph = tf.get_default_graph()
-    model = dict()
-    model.update({k: graph.get_tensor_by_name(v) for k,v in model_info['inputs'].items()})
-    model.update({k: graph.get_tensor_by_name(v) for k,v in model_info['outputs'].items()})
-    return model
+    pass
 
 class Logger:
     """
@@ -217,17 +207,7 @@ class Logger:
         Uses simple_save to save a trained model, plus info to make it easy
         to associated tensors to variables after restore. 
         """
-        if proc_id()==0:
-            assert hasattr(self, 'tf_saver_elements'), \
-                "First have to setup saving with self.setup_tf_saver"
-            fpath = 'tf1_save' + ('%d'%itr if itr is not None else '')
-            fpath = osp.join(self.output_dir, fpath)
-            if osp.exists(fpath):
-                # simple_save refuses to be useful if fpath already exists,
-                # so just delete fpath if it's there.
-                shutil.rmtree(fpath)
-            tf.saved_model.simple_save(export_dir=fpath, **self.tf_saver_elements)
-            joblib.dump(self.tf_saver_info, osp.join(fpath, 'model_info.pkl'))
+
     
 
     def setup_pytorch_saver(self, what_to_save):
